@@ -10,9 +10,10 @@ dataset_train.tar.gz
 dataset_test_noisy.zip
 
 # Training, validation, and prediction artifacts
+BestModel/
 experiments/
 results/
-checkpoint_selection/
+checkpoint_selection*/
 result.zip
 
 # Local environments and tooling

@@ -50,6 +50,22 @@ class NpyLazyAsset(LazyAsset):
         return asset
 
 @dataclass
+class CleanNpyLazyAsset(LazyAsset):
+    """Load a cached clean point cloud for training and validation."""
+    def load(self) -> "Asset":
+        pc = np.load(self.path)
+        if pc.ndim != 2 or pc.shape[1] != 3:
+            raise ValueError(f"clean point cloud must have shape (N, 3), got {pc.shape}: {self.path}")
+        if not np.isfinite(pc).all():
+            raise ValueError(f"clean point cloud contains non-finite values: {self.path}")
+        asset = Asset(
+            path=self.path,
+            cls=self.cls,
+            sampled_vertices=pc.astype(np.float32, copy=False),
+        )
+        return asset
+
+@dataclass
 class Datapath(ConfigSpec):
     """handle input data paths"""
     
@@ -92,6 +108,7 @@ class Datapath(ConfigSpec):
             None: ObjLazyAsset,
             'obj': ObjLazyAsset,
             'npy': NpyLazyAsset,
+            'clean_npy': CleanNpyLazyAsset,
         }
         input_dataset_dir = kwargs.get('input_dataset_dir', '')
         num_files = kwargs.get('num_files', None)

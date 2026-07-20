@@ -35,15 +35,27 @@ class AugmentSample(Augment):
         return AugmentSample(**kwargs)
     
     def apply(self, asset: Asset, **kwargs):
-        assert asset.vertices is not None
-        assert asset.faces is not None
-        sampled_vertices, sampled_normals, sampled_vertex_groups, hidden_states = sample_vertex_groups(
-            vertices=asset.vertices,
-            faces=asset.faces,
-            num_samples=self.num_samples,
-            num_vertex_samples=self.num_vertex_samples,
-        )
-        asset.sampled_vertices = sampled_vertices
+        if asset.vertices is not None and asset.faces is not None:
+            sampled_vertices, sampled_normals, sampled_vertex_groups, hidden_states = sample_vertex_groups(
+                vertices=asset.vertices,
+                faces=asset.faces,
+                num_samples=self.num_samples,
+                num_vertex_samples=self.num_vertex_samples,
+            )
+            asset.sampled_vertices = sampled_vertices
+            return
+
+        # Cached clean point clouds have already been sampled from the mesh.
+        # Draw a fresh subset on every __getitem__ call so epochs still see
+        # different clean inputs before dynamic noise and patch construction.
+        pc = asset.sampled_vertices
+        if pc is None:
+            raise ValueError("sample requires either a mesh or a cached clean point cloud")
+        if pc.ndim != 2 or pc.shape[1] != 3:
+            raise ValueError(f"cached clean point cloud must have shape (N, 3), got {pc.shape}")
+        replace = pc.shape[0] < self.num_samples
+        indices = np.random.choice(pc.shape[0], size=self.num_samples, replace=replace)
+        asset.sampled_vertices = pc[indices].astype(np.float32, copy=False)
 
 @dataclass(frozen=True)
 class AugmentNormalizePC(Augment):
