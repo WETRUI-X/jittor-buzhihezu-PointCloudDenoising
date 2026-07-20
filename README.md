@@ -350,18 +350,3 @@ result.zip
         └── <model_id>/
             └── denoised.npy
 ```
-
-## 本地评测
-
-需要对应的 clean GT；比赛官方测试 GT 通常不向选手提供：
-
-```bash
-python evaluate.py \
-  --pred_dir ./results/dataset_test_noisy \
-  --gt_dir ./test_gt \
-  --noisy_dir ./dataset_test_noisy \
-  --mesh_dir ./dataset_train \
-  --workers 8
-```
-
-评测脚本计算 CD；提供 mesh 时也计算 P2S。安装 `point-cloud-utils` 后使用 mesh BVH 计算更精确的 P2S，否则回退到 mesh 顶点近似。
