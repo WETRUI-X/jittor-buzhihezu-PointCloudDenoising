@@ -58,10 +58,26 @@ class CleanNpyLazyAsset(LazyAsset):
             raise ValueError(f"clean point cloud must have shape (N, 3), got {pc.shape}: {self.path}")
         if not np.isfinite(pc).all():
             raise ValueError(f"clean point cloud contains non-finite values: {self.path}")
+        vertices_path = os.path.join(os.path.dirname(self.path), "vertices.npy")
+        cached_vertices = None
+        if os.path.isfile(vertices_path):
+            cached_vertices = np.load(vertices_path)
+            if cached_vertices.ndim != 2 or cached_vertices.shape[1] != 3:
+                raise ValueError(
+                    f"cached OBJ vertices must have shape (N, 3), got "
+                    f"{cached_vertices.shape}: {vertices_path}"
+                )
+            if not np.isfinite(cached_vertices).all():
+                raise ValueError(
+                    f"cached OBJ vertices contain non-finite values: {vertices_path}"
+                )
+            cached_vertices = cached_vertices.astype(np.float32, copy=False)
+
         asset = Asset(
             path=self.path,
             cls=self.cls,
             sampled_vertices=pc.astype(np.float32, copy=False),
+            cached_vertices=cached_vertices,
         )
         return asset
 

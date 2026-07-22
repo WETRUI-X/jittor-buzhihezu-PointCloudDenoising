@@ -52,22 +52,32 @@ def process_one(task: Tuple[str, str, str, int, int, bool]) -> Tuple[str, str]:
     relative = Path(relative_s)
     source = input_root / relative / "models" / "model_normalized.obj"
     destination = output_root / relative / "clean.npy"
+    vertices_destination = output_root / relative / "vertices.npy"
 
-    if destination.exists() and not overwrite:
+    if destination.exists() and vertices_destination.exists() and not overwrite:
         return "skipped", relative.as_posix()
 
     try:
         mesh = load_mesh(source)
-        # trimesh uses NumPy's global RNG internally. A stable per-file seed
-        # makes output independent of task scheduling and worker count.
-        np.random.seed(sample_seed(seed, relative))
-        points, _ = trimesh.sample.sample_surface(mesh, num_points)
-        points = np.asarray(points, dtype=np.float32)
-        if points.shape != (num_points, 3):
-            raise ValueError(f"unexpected sampled shape: {points.shape}")
-        if not np.isfinite(points).all():
-            raise ValueError("sampled points contain non-finite values")
-        atomic_save(destination, points)
+        vertices = np.asarray(mesh.vertices, dtype=np.float32)
+        if vertices.ndim != 2 or vertices.shape[1] != 3:
+            raise ValueError(f"unexpected mesh vertex shape: {vertices.shape}")
+        if not np.isfinite(vertices).all():
+            raise ValueError("mesh vertices contain non-finite values")
+
+        # Keep an existing surface cache when only vertices.npy is missing.
+        # Use --overwrite when changing the requested surface-point count.
+        if overwrite or not destination.exists():
+            np.random.seed(sample_seed(seed, relative))
+            points, _ = trimesh.sample.sample_surface(mesh, num_points)
+            points = np.asarray(points, dtype=np.float32)
+            if points.shape != (num_points, 3):
+                raise ValueError(f"unexpected sampled shape: {points.shape}")
+            if not np.isfinite(points).all():
+                raise ValueError("sampled points contain non-finite values")
+            atomic_save(destination, points)
+
+        atomic_save(vertices_destination, vertices)
         return "written", relative.as_posix()
     except Exception as exc:
         return "failed", f"{relative.as_posix()}: {type(exc).__name__}: {exc}"
@@ -82,10 +92,10 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input_dir", default="dataset_train", help="Official mesh dataset root.")
     parser.add_argument("--output_dir", default="dataset_train_pcd", help="Clean point cache root.")
-    parser.add_argument("--num_points", type=int, default=50000, help="Surface points saved per mesh.")
+    parser.add_argument("--num_points", type=int, default=200000, help="Surface points saved per mesh.")
     parser.add_argument("--workers", type=int, default=min(os.cpu_count() or 1, 16), help="Worker processes.")
     parser.add_argument("--seed", type=int, default=123, help="Global deterministic seed.")
-    parser.add_argument("--overwrite", action="store_true", help="Regenerate existing clean.npy files.")
+    parser.add_argument("--overwrite", action="store_true", help="Regenerate existing clean.npy and vertices.npy files.")
     parser.add_argument("--limit", type=int, default=None, help="Process at most this many meshes (for testing).")
     return parser.parse_args()
 

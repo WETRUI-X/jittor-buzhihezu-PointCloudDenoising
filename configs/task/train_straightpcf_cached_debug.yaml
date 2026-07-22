@@ -1,0 +1,18 @@
+mode: train
+debug: False
+
+components:
+  data: train_cached_debug
+  transform: straightpcf
+  system: straightpcf_debug
+  model: straightpcf_debug
+
+loss:
+  loss: 1.0
+
+optimizer:
+  __target__: adam
+  lr: 0.0001
+
+trainer:
+  epochs: 1

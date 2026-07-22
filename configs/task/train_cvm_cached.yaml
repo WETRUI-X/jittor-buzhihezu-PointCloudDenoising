@@ -3,9 +3,9 @@ debug: False
 
 components:
   data: train_cached
-  transform: vm
-  system: vm
-  model: vm
+  transform: straightpcf
+  system: cvm
+  model: cvm
 
 loss:
   loss: 1.0

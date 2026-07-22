@@ -1,0 +1,14 @@
+__target__: StraightPCFModule
+frame_knn: 16
+num_train_points: 128
+dsm_sigma: 0.01
+velocity_embedding_dim: 256
+distance_embedding_dim: 128
+decoder_hidden_dim: 64
+num_modules: 4
+total_iterations: 2
+finetune_weight: 200.0
+init_cvm_ckpt: checkpoint_selection_cvm/best_checkpoint.pkl
+patch_size: 1000
+seed_k: 6
+seed_k_alpha: 1

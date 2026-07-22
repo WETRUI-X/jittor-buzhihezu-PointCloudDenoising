@@ -46,16 +46,29 @@ class AugmentSample(Augment):
             return
 
         # Cached clean point clouds have already been sampled from the mesh.
-        # Draw a fresh subset on every __getitem__ call so epochs still see
-        # different clean inputs before dynamic noise and patch construction.
+        # Preserve original OBJ vertices, then fill from the surface pool.
         pc = asset.sampled_vertices
         if pc is None:
             raise ValueError("sample requires either a mesh or a cached clean point cloud")
         if pc.ndim != 2 or pc.shape[1] != 3:
             raise ValueError(f"cached clean point cloud must have shape (N, 3), got {pc.shape}")
-        replace = pc.shape[0] < self.num_samples
-        indices = np.random.choice(pc.shape[0], size=self.num_samples, replace=replace)
-        asset.sampled_vertices = pc[indices].astype(np.float32, copy=False)
+
+        cached_vertices = asset.cached_vertices
+        if cached_vertices is not None:
+            num_vertices = min(
+                self.num_vertex_samples, self.num_samples, cached_vertices.shape[0]
+            )
+            vertex_indices = np.random.permutation(cached_vertices.shape[0])[:num_vertices]
+            selected_vertices = cached_vertices[vertex_indices]
+        else:
+            num_vertices = 0
+            selected_vertices = np.empty((0, 3), dtype=np.float32)
+
+        num_surface = self.num_samples - num_vertices
+        replace = pc.shape[0] < num_surface
+        surface_indices = np.random.choice(pc.shape[0], size=num_surface, replace=replace)
+        sampled = np.concatenate([selected_vertices, pc[surface_indices]], axis=0)
+        asset.sampled_vertices = sampled.astype(np.float32, copy=False)
 
 @dataclass(frozen=True)
 class AugmentNormalizePC(Augment):
@@ -77,22 +90,31 @@ class AugmentNormalizePC(Augment):
 
 @dataclass(frozen=True)
 class AugmentAddNoise(Augment):
-    
+
     noise_std_min: float
-    
+
     noise_std_max: float
-    
+
+    noise_type: str="laplace"
+
     @classmethod
     def parse(cls, **kwargs) -> 'AugmentAddNoise':
         cls.check_keys(kwargs)
         return AugmentAddNoise(**kwargs)
-    
+
     def apply(self, asset: Asset, **kwargs):
         pc = asset.sampled_vertices
         assert pc is not None, "sampled_vertices is None, cannot apply AugmentAddNoise"
         noise_std = np.random.uniform(self.noise_std_min, self.noise_std_max)
-        noise = np.random.laplace(0, noise_std, size=pc.shape)
-        asset.sampled_vertices_noisy = pc + noise
+        if self.noise_type == "laplace":
+            # np.random.laplace 的 scale 参数 b 对应 std = sqrt(2) * b，
+            # 这里将配置中的标准差换算为尺度参数，保证训练噪声与测试噪声强度一致
+            noise = np.random.laplace(0.0, noise_std / np.sqrt(2.0), size=pc.shape)
+        elif self.noise_type == "gaussian":
+            noise = np.random.normal(0.0, noise_std, size=pc.shape)
+        else:
+            raise ValueError(f"unsupported noise_type: {self.noise_type}")
+        asset.sampled_vertices_noisy = (pc + noise).astype(np.float32, copy=False)
 
 @dataclass(frozen=True)
 class AugmentLinear(Augment):
@@ -162,8 +184,23 @@ class AugmentPatch(Augment):
         tree = cKDTree(pc_noisy)
         _, nn_idx = tree.query(seed_points, k=self.patch_size)   # (P, M)
 
-        pat_A = pc_noisy[nn_idx]  # (P, M, 3)
-        pat_B = pc[nn_idx]        # (P, M, 3)
+        pat_A = pc_noisy[nn_idx].astype(np.float32, copy=False)  # (P, M, 3)
+        pat_B = pc[nn_idx].astype(np.float32, copy=False)        # (P, M, 3)
+
+        if self.train_cvm_network:
+            # CVM and DistanceModule share one interpolation time per patch.
+            t = np.random.uniform(1e-8, 1.0, size=(self.num_patches,)).astype(np.float32)
+            seed_points_t = (
+                t[:, None] * pc[seed_idx] +
+                (1.0 - t[:, None]) * pc_noisy[seed_idx]
+            ).astype(np.float32, copy=False)
+            if asset.meta is None:
+                asset.meta = {}
+            asset.meta['pc_noisy'] = pat_A
+            asset.meta['pc_clean'] = pat_B
+            asset.meta['seed_points_t'] = seed_points_t[:, None, :]
+            asset.meta['original_time_step'] = t
+            return
 
         l1, l2 = 1e-8, 1.0
         t = np.random.rand(self.num_patches, self.patch_size, 1)

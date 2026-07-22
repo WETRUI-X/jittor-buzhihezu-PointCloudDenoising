@@ -2,10 +2,10 @@ mode: train
 debug: False
 
 components:
-  data: train_cached
-  transform: vm
-  system: vm
-  model: vm
+  data: train_cached_debug
+  transform: straightpcf
+  system: cvm_debug
+  model: cvm
 
 loss:
   loss: 1.0
@@ -15,4 +15,4 @@ optimizer:
   lr: 0.0001
 
 trainer:
-  epochs: 100
+  epochs: 1

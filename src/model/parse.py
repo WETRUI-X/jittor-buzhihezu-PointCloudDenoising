@@ -1,9 +1,12 @@
 from .spec import ModelSpec
 from .vm import VelocityModule
+from .straightpcf import CoupledVelocityModule, StraightPCFModule
 
 def get_model(model_config, **kwargs) -> ModelSpec:
     MAP = {
         'VelocityModule': VelocityModule,
+        'CoupledVelocityModule': CoupledVelocityModule,
+        'StraightPCFModule': StraightPCFModule,
     }
     __target__ = model_config['__target__']
     del model_config['__target__']

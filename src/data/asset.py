@@ -17,6 +17,11 @@ class Asset():
     faces: Optional[ndarray]=None # shape (F, 3)
     
     sampled_vertices: Optional[ndarray]=None
+
+    # Original OBJ vertices stored alongside a cached surface-point pool.
+    # AugmentSample may preserve a random subset of these during training.
+    cached_vertices: Optional[ndarray]=None
+
     
     sampled_vertices_noisy: Optional[ndarray]=None
     
@@ -29,6 +34,10 @@ class Asset():
         
         if self.vertices is not None:
             self.vertices = _apply(self.vertices, trans)
+        if self.sampled_vertices is not None:
+            self.sampled_vertices = _apply(self.sampled_vertices, trans)
+        if self.sampled_vertices_noisy is not None:
+            self.sampled_vertices_noisy = _apply(self.sampled_vertices_noisy, trans)
 
 class Exporter(): # a simple parser
     
