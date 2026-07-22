@@ -7,8 +7,41 @@
 本项目针对拉普拉斯噪声做了三处适配：
 
 1. **噪声建模**(`src/data/augment.py` 的 `AugmentAddNoise`)：通过 `noise_type` 支持 `laplace`（默认）与 `gaussian`。配置中的 `noise_std_min/max` 统一表示噪声**标准差**；拉普拉斯采样时自动将标准差换算为尺度参数 `b = std / sqrt(2)`，保证训练噪声强度与测试集一致。
-2. **损失函数**(`src/model/vm.py` 的 `get_supervised_loss`)：拉普拉斯噪声的最大似然估计对应 L1 损失，因此将原 L2 损失替换为 Charbonnier（平滑 L1）损失 `sqrt(||d||^2 + eps)`，既对拉普拉斯重尾离群噪声鲁棒，又避免 L1 在零点不可导。
+2. **损失函数**(`src/model/vm.py`、`src/model/straightpcf.py`)：拉普拉斯噪声的最大似然估计对应 L1 损失，因此三个阶段（VM / CVM / DistanceModule）统一使用 Charbonnier（平滑 L1）损失 `sqrt(||d||^2 + eps)`，既对拉普拉斯重尾离群噪声鲁棒，又避免 L1 在零点不可导。
 3. **推理融合**(`src/model/vm.py` 的 `patch_based_denoise`)：每个点的最终位置由覆盖它的所有 patch 预测按 `exp(-dist)` 加权融合得到，替代原先"只取单个最佳 patch"的策略，可抑制离群 patch 预测；同时用 scatter 向量化实现，替代逐点 Python 循环，推理显著加速。
+
+## 竞赛提分工具
+
+### 按 CD 选 checkpoint
+
+`select_best_checkpoint.py` 新增 `--metric cd`：在验证集上动态加噪、实际推理并计算 Chamfer Distance，与竞赛评分直接对齐（噪声种子固定，所有 checkpoint 输入一致）：
+
+```bash
+python select_best_checkpoint.py \
+  --ckpt_dir experiments/vm \
+  --task_template configs/task/train_vm_cached.yaml \
+  --metric cd --cd_limit 50 \
+  --output_dir checkpoint_selection_cd \
+  --copy_best
+```
+
+`--noise_std_min/max` 控制 CD 评估的加噪范围，默认与训练一致（0.005~0.020）。
+
+### 估计测试集噪声水平
+
+```bash
+python scripts/estimate_noise_level.py --input_dir dataset_test_noisy
+```
+
+通过局部 PCA 法向残差估计单轴噪声 std（中位数稳健、略偏大）。若测试噪声集中在某个固定值，建议把配置的 `noise_std_min/max` 收窄对准它。
+
+### 推理多轮迭代
+
+模型配置（如 `configs/model/vm.yaml`）新增可选项：
+
+```yaml
+predict_rounds: 2        # 多轮迭代降噪，默认 1；>1 需在验证集确认不过度收缩
+```
 
 ## 环境安装
 

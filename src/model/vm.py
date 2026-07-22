@@ -112,19 +112,25 @@ class VelocityModule(ModelSpec):
     def predict_step(self, batch: Dict) -> List[Dict]:
         pc_noisy_batch = batch['pc_noisy']
         assert pc_noisy_batch.ndim == 3
-        
-        num_steps = 1
+
+        # predict_rounds: 将上一轮输出重新当作输入迭代降噪，
+        # 对拉普拉斯重尾残留的离群点有效；>1 时需验证细节不过度收缩
+        num_steps = int(self.model_config.get('predict_rounds', 1))
         res = []
         for i, pc_noisy in enumerate(pc_noisy_batch):
             pc_next = pc_noisy
             for it in range(num_steps):
-                pc_next = patch_based_denoise(
+                pc_out = patch_based_denoise(
                     model=self,
                     pcl_noisy=pc_next,
                     patch_size=1000,
                     seed_k=6,
                     seed_k_alpha=1,
                 )
+                if pc_out is None:
+                    # patch 推理失败时回退上一步结果，保证输出完整
+                    break
+                pc_next = pc_out
             pc_denoised = pc_next.detach().numpy()
             res.append({"pc_denoised": pc_denoised})
         return res

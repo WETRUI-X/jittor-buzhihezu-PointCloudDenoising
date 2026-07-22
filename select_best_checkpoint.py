@@ -28,6 +28,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
+import numpy as np
+
 
 MODEL_TARGET_FALLBACK = {
     "vm": "VelocityModule",
@@ -292,6 +294,85 @@ def evaluate_checkpoint(ckpt_path: Path, context: Dict, log_path: Path) -> Tuple
     return metrics.get("val/loss_mean"), metrics
 
 
+def _chamfer_distance(a, b) -> float:
+    """与 evaluate.py 一致的 CD：双向最近点平方距离均值（点云已归一化）。"""
+    from scipy.spatial import cKDTree
+
+    tree_b = cKDTree(b)
+    dist_a2b, _ = tree_b.query(a, k=1)
+    tree_a = cKDTree(a)
+    dist_b2a, _ = tree_a.query(b, k=1)
+    return float((dist_a2b ** 2).mean() + (dist_b2a ** 2).mean())
+
+
+def _normalize_unit_sphere(pc):
+    p_max = pc.max(axis=0)
+    p_min = pc.min(axis=0)
+    pc = pc - (p_max + p_min) / 2
+    scale = np.sqrt((pc ** 2).sum(axis=1).max()).max()
+    return pc / scale
+
+
+def evaluate_checkpoint_cd(ckpt_path: Path, context: Dict, log_path: Path, args) -> Tuple[Optional[float], Dict[str, float]]:
+    """在验证集上直接计算 Chamfer Distance：动态加噪 → 模型推理 → 对比 clean GT。
+
+    与 loss 模式不同，该指标与竞赛评分直接对齐。噪声按固定种子生成，
+    所有 checkpoint 面对完全相同的含噪输入，排名可比。
+    """
+    import jittor as jt
+    import numpy as np
+
+    from src.model.parse import get_model
+
+    np.random.seed(context["seed"])
+    random.seed(context["seed"])
+
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8", errors="replace") as log_file:
+        with contextlib.redirect_stdout(log_file), contextlib.redirect_stderr(log_file):
+            model = get_model(
+                model_config=deepcopy(context["model_config"]),
+                transform_config=deepcopy(context["transform_config"]),
+            )
+            model.load(str(ckpt_path))
+            model.set_predict(True)
+            model.eval()
+
+            cds: List[float] = []
+            sample_index = 0
+            for cls, ds_config in context["validate_dataset_config"].items():
+                for lazy_asset in ds_config.datapath.get_data():
+                    if args.cd_limit is not None and sample_index >= args.cd_limit:
+                        break
+                    asset = lazy_asset.load()
+                    pool = asset.sampled_vertices
+                    if pool is None or pool.shape[0] < args.cd_points:
+                        continue
+
+                    rs = np.random.RandomState(context["seed"] + sample_index)
+                    clean = pool[rs.choice(pool.shape[0], args.cd_points, replace=False)]
+                    clean = _normalize_unit_sphere(clean.astype(np.float32))
+                    noise_std = rs.uniform(args.noise_std_min, args.noise_std_max)
+                    noise = rs.laplace(0.0, noise_std / np.sqrt(2.0), size=clean.shape)
+                    noisy = (clean + noise).astype(np.float32)
+
+                    pred = model.predict_step({"pc_noisy": jt.array(noisy[None])})
+                    denoised = pred[0]["pc_denoised"]
+                    cd = _chamfer_distance(denoised, clean)
+                    cd_noisy = _chamfer_distance(noisy, clean)
+                    cds.append(cd)
+                    print(f"sample {sample_index} ({asset.path}): cd={cd:.8f} cd_noisy={cd_noisy:.8f} improve={100*(1-cd/cd_noisy):.2f}")
+                    sample_index += 1
+
+            mean_cd = mean(cds)
+            metrics = {"val/cd_mean": mean_cd} if mean_cd is not None else {}
+            print(json.dumps(metrics, indent=2, ensure_ascii=False))
+            if hasattr(jt, "gc"):
+                jt.gc()
+
+    return metrics.get("val/cd_mean"), metrics
+
+
 def rank_results(results: List[CheckpointResult]) -> List[CheckpointResult]:
     ok = [item for item in results if item.status == "ok" and item.score is not None]
     bad = [item for item in results if item.status != "ok" or item.score is None]
@@ -313,11 +394,14 @@ def run_selection(args, checkpoints: List[Path], existing: Dict[str, CheckpointR
             continue
 
         epoch = checkpoint_epoch(ckpt)
-        log_path = output_dir / "logs" / f"{ckpt.stem}_val_loss.log"
+        log_path = output_dir / "logs" / f"{ckpt.stem}_{args.metric}.log"
 
-        print(f"[{index}/{len(checkpoints)}] validate loss: {ckpt}")
+        print(f"[{index}/{len(checkpoints)}] validate {args.metric}: {ckpt}")
         try:
-            val_loss, _ = evaluate_checkpoint(ckpt_abs, context, log_path)
+            if args.metric == "cd":
+                score, _ = evaluate_checkpoint_cd(ckpt_abs, context, log_path, args)
+            else:
+                score, _ = evaluate_checkpoint(ckpt_abs, context, log_path)
         except Exception as exc:
             log_path.parent.mkdir(parents=True, exist_ok=True)
             with log_path.open("a", encoding="utf-8", errors="replace") as log_file:
@@ -329,13 +413,13 @@ def run_selection(args, checkpoints: List[Path], existing: Dict[str, CheckpointR
             write_results(rank_results(results), output_dir)
             continue
 
-        if val_loss is None:
-            error = f"could not compute validation loss, see {log_path}"
+        if score is None:
+            error = f"could not compute validation {args.metric}, see {log_path}"
             print(f"  {error}")
             results.append(CheckpointResult(ckpt_key, epoch, None, "parse_failed", error))
         else:
-            print(f"  val_loss: {val_loss:.8f}")
-            results.append(CheckpointResult(ckpt_key, epoch, val_loss, "ok"))
+            print(f"  {args.metric}: {score:.8f}")
+            results.append(CheckpointResult(ckpt_key, epoch, score, "ok"))
 
         write_results(rank_results(results), output_dir)
 
@@ -344,6 +428,12 @@ def run_selection(args, checkpoints: List[Path], existing: Dict[str, CheckpointR
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Select the best checkpoint by local validation loss.")
+    parser.add_argument("--metric", choices=["loss", "cd"], default="loss",
+                        help="loss=训练损失代理; cd=验证集上真实 Chamfer Distance，与竞赛评分对齐")
+    parser.add_argument("--cd_points", type=int, default=32768, help="CD 模式每个模型采样点数")
+    parser.add_argument("--cd_limit", type=int, default=None, help="CD 模式最多评估多少个验证模型")
+    parser.add_argument("--noise_std_min", type=float, default=0.005, help="CD 模式加噪 std 下限")
+    parser.add_argument("--noise_std_max", type=float, default=0.020, help="CD 模式加噪 std 上限")
     parser.add_argument("--ckpt_dir", default="experiments/vm", help="Directory containing checkpoint_*.pkl files.")
     parser.add_argument("--pattern", default="checkpoint_*.pkl", help="Checkpoint filename pattern.")
     parser.add_argument("--task_template", default="configs/task/train_vm.yaml", help="Training task yaml.")
@@ -383,7 +473,7 @@ def main() -> int:
     print("\nBest checkpoint")
     print(f"  checkpoint: {best.checkpoint}")
     print(f"  epoch: {best.epoch}")
-    print(f"  val_loss: {best.score:.8f}")
+    print(f"  {args.metric}: {best.score:.8f}")
     print(f"  ranking: {output_dir / 'checkpoint_ranking.csv'}")
 
     if args.copy_best:

@@ -66,12 +66,20 @@ class _StraightPCFBase(ModelSpec):
     def predict_step(self, batch: Dict) -> List[Dict]:
         pc_noisy_batch = batch["pc_noisy"]
         assert pc_noisy_batch.ndim == 3
+        # predict_rounds: 多轮迭代降噪，将上一轮输出重新作为输入
+        num_rounds = int(self.model_config.get("predict_rounds", 1))
         results = []
         for pc_noisy in pc_noisy_batch:
-            denoised = patch_based_denoise(
-                self, pc_noisy, self.patch_size, self.seed_k, self.seed_k_alpha
-            )
-            denoised = denoised.detach().numpy().astype(np.float32, copy=False)
+            pc_current = pc_noisy
+            for _ in range(num_rounds):
+                denoised = patch_based_denoise(
+                    self, pc_current, self.patch_size, self.seed_k, self.seed_k_alpha
+                )
+                if denoised is None:
+                    # patch 推理失败时回退上一步结果，保证输出完整
+                    break
+                pc_current = denoised
+            denoised = pc_current.detach().numpy().astype(np.float32, copy=False)
             if denoised.shape != tuple(pc_noisy.shape):
                 raise RuntimeError(
                     f"denoised shape {denoised.shape} does not match input {tuple(pc_noisy.shape)}"
@@ -235,10 +243,13 @@ class StraightPCFModule(_StraightPCFBase):
         )
 
         for velocity_net in self.velocity_nets:
-            feat = velocity_net.encoder(pc_current)
-            pred_dir = velocity_net.decoder(
-                c=feat.reshape(-1, feat.shape[-1])
-            ).reshape(batch_size, num_points, dims)
+            # 速度网络已冻结，其输出仅作为与 pred_distance 相乘的常量，
+            # 无需构建梯度图；endpoint_loss 的梯度经乘法项回流到 distance 模块
+            with jt.no_grad():
+                feat = velocity_net.encoder(pc_current)
+                pred_dir = velocity_net.decoder(
+                    c=feat.reshape(-1, feat.shape[-1])
+                ).reshape(batch_size, num_points, dims)
             pc_current = pc_current + pred_distance * pred_dir / self.num_modules
 
         endpoint_loss = _charbonnier_vector_loss(pc_clean - pc_current)
