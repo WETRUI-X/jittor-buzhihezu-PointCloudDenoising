@@ -2,6 +2,14 @@
 
 本项目用于点云降噪任务：输入含噪点云 `noisy.npy`，模型预测每个点的三维位移，并输出相同点数的 `denoised.npy`。项目保留官方 OBJ 训练流程，同时提供 clean point cloud 缓存训练流程，用于减少每个 epoch 重复解析 OBJ 和 mesh 表面采样造成的 CPU/IO 开销。
 
+## 拉普拉斯噪声适配说明
+
+本项目针对拉普拉斯噪声做了三处适配：
+
+1. **噪声建模**(`src/data/augment.py` 的 `AugmentAddNoise`)：通过 `noise_type` 支持 `laplace`（默认）与 `gaussian`。配置中的 `noise_std_min/max` 统一表示噪声**标准差**；拉普拉斯采样时自动将标准差换算为尺度参数 `b = std / sqrt(2)`，保证训练噪声强度与测试集一致。
+2. **损失函数**(`src/model/vm.py` 的 `get_supervised_loss`)：拉普拉斯噪声的最大似然估计对应 L1 损失，因此将原 L2 损失替换为 Charbonnier（平滑 L1）损失 `sqrt(||d||^2 + eps)`，既对拉普拉斯重尾离群噪声鲁棒，又避免 L1 在零点不可导。
+3. **推理融合**(`src/model/vm.py` 的 `patch_based_denoise`)：每个点的最终位置由覆盖它的所有 patch 预测按 `exp(-dist)` 加权融合得到，替代原先"只取单个最佳 patch"的策略，可抑制离群 patch 预测；同时用 scatter 向量化实现，替代逐点 Python 循环，推理显著加速。
+
 ## 环境安装
 
 推荐使用 Python 3.9，并确保 GCC/G++ 版本不高于 10。

@@ -67,9 +67,12 @@ class VelocityModule(ModelSpec):
         pred_dir = self.decoder(
             c=feat.reshape(-1, F_dim)
         ).reshape(B, len(pnt_idx), d) # type: ignore
-        
-        loss = (((pred_dir - grad_dir_t_target) ** 2.0) / self.dsm_sigma).sum(dim=-1).mean()
-        
+
+        # 拉普拉斯噪声的 MLE 对应 L1 损失；使用 Charbonnier（平滑 L1）
+        # 既保留对重尾离群噪声的鲁棒性，又避免 L1 在零点处不可导
+        diff = pred_dir - grad_dir_t_target
+        loss = (jt.sqrt((diff ** 2.0).sum(dim=-1) + 1e-12) / self.dsm_sigma).mean()
+
         return loss
 
     def denoise_langevin_dynamics(self, pcl_noisy, num_steps: int=4):
@@ -204,31 +207,20 @@ def patch_based_denoise(model: VelocityModule, pcl_noisy, patch_size=1000, seed_
     
     seed_pnts, seed_idx = farthest_point_sampling(pcl_noisy, num_patches)
     patch_dists, point_idxs, patches = knn_points(seed_pnts, pcl_noisy, patch_size)
-    
-    from ..data.asset import Exporter
-    pts = patches[0].reshape(-1, 3).detach().numpy()
-    
+
     patches = patches[0]              # (P, M, 3)
     patch_dists = patch_dists[0]      # (P, M)
     point_idxs = point_idxs[0]        # (P, M)
-    
+
     seed_expand = seed_pnts.squeeze().unsqueeze(1).broadcast(patches.shape)
     patches = patches - seed_expand
-    
+
     patch_dists = patch_dists / (patch_dists[:, -1:].broadcast(patch_dists.shape) + 1e-8)
-    
-    all_dists = jt.ones((num_patches, N)) * 1e10
-    
-    for i in range(num_patches):
-        all_dists[i][point_idxs[i]] = patch_dists[i]
-        
-    weights = jt.exp(-all_dists)
-    best_weights_idx, _ = jt.argmax(weights, dim=0)
-    patches_denoised = []
-    
+
     i = 0
     patch_step = int(ceil(N / (seed_k_alpha * patch_size)))
     assert patch_step > 0
+    patches_denoised = []
     while i < num_patches:
         curr = patches[i:i+patch_step]
         try:
@@ -238,19 +230,27 @@ def patch_based_denoise(model: VelocityModule, pcl_noisy, patch_size=1000, seed_
             return None
         patches_denoised.append(out)
         i += patch_step
-    
+
     patches_denoised = jt.concat(patches_denoised, dim=0)
     patches_denoised = patches_denoised + seed_expand
     pcl_original = pcl_noisy.squeeze(0)
-    pcl_out = []
-    for pidx in range(N):
-        patch_id = best_weights_idx[pidx].item()
-        mask = (point_idxs[patch_id] == pidx)
-        selected = patches_denoised[patch_id][mask]
-        if selected.shape[0] == 0:
-            selected = pcl_original[pidx:pidx+1]
-        else:
-            selected = selected[:1]
-        pcl_out.append(selected)
-    pcl_out = jt.concat(pcl_out, dim=0)
+
+    # 按 exp(-dist) 权重对所有覆盖该点的 patch 预测做加权融合，
+    # 而非只取单个最佳 patch：平均多个预测可抑制拉普拉斯重尾造成的离群估计，
+    # 同时用 scatter 向量化，替代逐点 Python 循环
+    flat_idx = point_idxs.reshape(-1)                                    # (P*M,)
+    flat_w = jt.exp(-patch_dists).reshape(-1, 1)                         # (P*M, 1)
+    flat_pred = patches_denoised.reshape(-1, 3) * flat_w                 # (P*M, 3)
+    num_flat = flat_idx.shape[0]
+
+    pred_sum = jt.zeros((N, 3)).scatter_(
+        0, flat_idx.unsqueeze(1).broadcast((num_flat, 3)), flat_pred, reduce='add'
+    )
+    weight_sum = jt.zeros((N, 1)).scatter_(
+        0, flat_idx.unsqueeze(1).broadcast((num_flat, 1)), flat_w, reduce='add'
+    )
+
+    covered = (weight_sum > 1e-12).broadcast((N, 3))
+    pcl_fused = pred_sum / (weight_sum + 1e-12)
+    pcl_out = jt.where(covered, pcl_fused, pcl_original)
     return pcl_out

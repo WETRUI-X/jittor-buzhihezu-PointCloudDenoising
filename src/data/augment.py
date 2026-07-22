@@ -90,22 +90,31 @@ class AugmentNormalizePC(Augment):
 
 @dataclass(frozen=True)
 class AugmentAddNoise(Augment):
-    
+
     noise_std_min: float
-    
+
     noise_std_max: float
-    
+
+    noise_type: str="laplace"
+
     @classmethod
     def parse(cls, **kwargs) -> 'AugmentAddNoise':
         cls.check_keys(kwargs)
         return AugmentAddNoise(**kwargs)
-    
+
     def apply(self, asset: Asset, **kwargs):
         pc = asset.sampled_vertices
         assert pc is not None, "sampled_vertices is None, cannot apply AugmentAddNoise"
         noise_std = np.random.uniform(self.noise_std_min, self.noise_std_max)
-        noise = np.random.laplace(0, noise_std, size=pc.shape)
-        asset.sampled_vertices_noisy = pc + noise
+        if self.noise_type == "laplace":
+            # np.random.laplace 的 scale 参数 b 对应 std = sqrt(2) * b，
+            # 这里将配置中的标准差换算为尺度参数，保证训练噪声与测试噪声强度一致
+            noise = np.random.laplace(0.0, noise_std / np.sqrt(2.0), size=pc.shape)
+        elif self.noise_type == "gaussian":
+            noise = np.random.normal(0.0, noise_std, size=pc.shape)
+        else:
+            raise ValueError(f"unsupported noise_type: {self.noise_type}")
+        asset.sampled_vertices_noisy = (pc + noise).astype(np.float32, copy=False)
 
 @dataclass(frozen=True)
 class AugmentLinear(Augment):
